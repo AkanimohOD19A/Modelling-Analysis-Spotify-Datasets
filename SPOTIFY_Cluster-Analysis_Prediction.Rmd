@@ -1,0 +1,190 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+library(tidyverse)
+library(data.table)
+library(DT)
+library(MASS)
+
+df <- read.csv("C:/Users/PC/Documents/R_4DS/Spotify/data.csv/data.csv")
+```
+
+```{r setTheme}
+theme_set(theme_classic() + #set the theme 
+    theme(text = element_text(size = 20))) #set the default text size
+
+# opts_chunk$set(comment = "",
+#                fig.show = "hold")
+```
+
+
+## Data Inspection and Cleaning
+
+```{r}
+## Check for missing value
+null_vars <- (sapply(df, function(x) sum(is.na(x))))
+t(data.frame(null_vars))
+```
+
+```{r}
+blank_vars <- sapply(df, function(x) sum(x == ""))
+t(data.frame(blank_vars))
+```
+
+```{r}
+spotify_df <- df %>% 
+  mutate(artists = str_extract(artists, '(\\w.*)(.*\\w)')) %>% 
+  mutate(key = as.factor(key)) %>% 
+  mutate(year = as.factor(year)) %>% 
+  mutate(name = as.character(name)) %>% 
+  mutate(explicit = as.factor(explicit)) %>% 
+  mutate(acoustics = acousticness + instrumentalness) %>% 
+  mutate(acoustics = ifelse(acoustics >= 0.4, 0, 1)) %>% 
+  mutate(acoustics = as.factor(acoustics)) %>% 
+  mutate(decades = case_when(
+    year < 1930 ~ "Y1920_Y1929",
+    year < 1940 ~ "Y1930_Y1939",
+    year < 1950 ~ "Y1940_Y1949",
+    year < 1960 ~ "Y1950_Y1959",
+    year < 1970 ~ "Y1960_Y1969",
+    year < 1980 ~ "Y1970_Y1979",
+    year < 1990 ~ "Y1980_Y1989",
+    year < 2000 ~ "Y1990_Y1999",
+    TRUE ~ "2000s"
+  )) %>% 
+  rename(song_name = name) %>% 
+  dplyr::select(-c(release_date, id, mode, acousticness, instrumentalness))
+
+```
+
+Acousticness and Instrumentaliness are heaped to the extremes, 0's and 1's, merged as One Factor variable.
+
+Popularity of music holds a negative relative with the counts of music.
+
+## Exploratory Data Analysis
+
+```{r}
+df_num <- spotify_df %>% 
+  select_if(is.numeric) %>% 
+  subset()
+
+par(mfrow= c(3,3))
+
+invisible(lapply(names(df_num), function(col_name) 
+  truehist(df_num[,col_name], main = paste("Histogram of ", col_name), xlab = NA)))
+```
+
+#### Quick Correlation (Only Numeric Columns) on Song Popularity
+```{r On Popularity}
+cor_df <- cor(subset(select_if(spotify_df, is.numeric)), use = "pairwise.complete.obs")[,"popularity"]
+(data.frame(cor_df) %>% 
+    arrange(-cor_df))
+```
+
+## Model Fitting
+
+```{r}
+library(superml)
+
+df <- spotify_df %>% 
+  dplyr::select(-c("artists", "song_name", "year")) %>% 
+  dplyr::select(popularity, everything()) %>% 
+  mutate(acoustics = as.numeric(acoustics)) %>% 
+  mutate(explicit = as.numeric(explicit)) %>% 
+  mutate(key = as.numeric(key))
+
+lbl= LabelEncoder$new()
+df$decades = lbl$fit_transform(df$decades)
+
+
+##Replace NaN & Inf with NA
+
+df[is.na(df) | df=="Inf" | df=="-Inf"] == NA
+
+## Train-Test
+n_split <- round(0.8 * nrow(df))
+train_indices <- sample(1:nrow(df), n_split)
+train_set <- df[train_indices, ]
+test_set <- df[-train_indices, ]
+
+# tt_split <- function(df, x){
+#   n_split <- round(x * nrow(df))
+#   
+#   indices <- sample(1:nrow(df), n_split)
+#   
+#   df_train <- df[indices, ]
+#   df_test <- df[-indices, ]
+#   return(list(df_train, df_test))
+# }
+
+
+## Feature scale (Preserving Outcome Variable)
+
+###---|| NB: We do not scales the Response Variable;Data has to be numeric.
+# train_set[-1] = scale(train_set[-1])
+# test_set[-1] = scale(test_set[-1])
+```
+
+```{r}
+##Linear Regression
+lin_reg <- lm(popularity ~ .-popularity, data = train_set, na.action=na.exclude)
+
+summary(lin_reg)
+
+```
+
+
+## Model Evaluation
+
+```{r}
+library(forecast)
+#use predict() to make prediction on a new set
+pred1 <- predict(lin_reg, test_set ,type = "response")
+
+residuals <- test_set$popularity - pred1
+
+linreg_pred <- data.frame("Predicted" = pred1, 
+                          "Actual" = test_set$popularity, 
+                          "Residual" = residuals)
+
+accuracy(pred1, test_set$popularity)
+```
+
+
+## CART
+```{r}
+## Classification Tree
+
+library(rpart)
+library(rpart.plot)
+
+class.tree <- rpart(popularity ~.,
+                    data = train_set,
+                    control = rpart.control(cp = 0.01))
+
+plotcp(class.tree)
+printcp(class.tree)
+```
+
+```{r}
+rpart.plot(class.tree, 
+           box.palette="GnBu",
+           branch.lty=3, shadow.col="gray", nn=TRUE)
+```
+
+
+```{r}
+## Random Forest
+#Random Forest
+library(randomForest)
+RF <- randomForest(popularity ~.-popularity, 
+                   data = train_set, 
+                   importance =TRUE,
+                   ntree=500,
+                   nodesize=7, 
+                   na.action = na.roughfix)
+```
+
